@@ -180,6 +180,8 @@ class MicrophoneAudioSource(AudioSource):
         self._queue = SimpleQueue()
 
     def _read_callback(self, samples, *args):
+        print(samples.shape)
+        print(samples[:, [0]].T.shape)
         self._queue.put_nowait(samples[:, [0]].T)
 
     def read(self):
@@ -297,7 +299,8 @@ class TorchStreamAudioSource(AudioSource):
                 if self.is_closed:
                     break
                 # shape (samples, channels) to (1, samples)
-                chunk = np.mean(item[0].numpy(), axis=1, keepdims=True).T
+                # chunk = np.mean(item[0].numpy(), axis=1, keepdims=True).T
+                chunk = torch.mean(item[0], dim=1, keepdim=True).T
                 self.stream.on_next(chunk)
             except BaseException as e:
                 self.stream.on_error(e)
@@ -320,3 +323,56 @@ class AppleDeviceAudioSource(TorchStreamAudioSource):
         uri = f"apple_input_device:{device}"
         streamer = StreamReader(device, format="avfoundation")
         super().__init__(uri, sample_rate, streamer, stream_index, block_duration)
+
+class ManualAudioSource(AudioSource):
+    """Audio source tied to a buffer, allowing for 
+       manual chunk processing.
+
+    Parameters
+    ----------
+    block_duration: int
+        Duration of each emitted chunk in seconds.
+        Defaults to 0.5 seconds.
+    # device: int | str | (int, str) | None
+    #     Device identifier compatible for the sounddevice stream.
+    #     If None, use the default device.
+    #     Defaults to None.
+    """
+
+    def __init__(
+        self,
+        block_duration: float = 0.5,
+        sample_rate: int = 16000,
+        uri: Text = 'Manual-Chunk-Loader',
+    ):
+        self.sample_rate = sample_rate
+        super().__init__(uri, sample_rate)
+
+        self._queue = SimpleQueue()
+        self.closed = False
+        self.block_size = int(np.rint(block_duration * self.sample_rate))
+
+    # chunk shape is (1, block_size)
+    def load_chunk(self, chunk):
+        if chunk.shape[0] != 1:
+            chunk = chunk.reshape(1, -1)
+
+        self._queue.put_nowait(chunk)
+
+    def read(self):
+        while not self.closed:
+            try:
+                while self._queue.empty():
+                    if self.closed:
+                        break
+                if not self._queue.empty():
+                    chunk = self._queue.get_nowait()
+                    self.stream.on_next(chunk)
+            except Exception as e:
+                self.stream.on_error(e)
+                break
+        self.stream.on_completed()
+        self.close()
+
+    def close(self):
+        self.closed = True
