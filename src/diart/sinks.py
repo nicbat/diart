@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Union, Text, Optional, Tuple
+from queue import Empty, SimpleQueue
 
 import matplotlib.pyplot as plt
 from pyannote.core import Annotation, Segment, SlidingWindowFeature, notebook
@@ -175,3 +176,58 @@ class StreamingPlot(Observer):
         self.figure.canvas.draw()
         self.figure.canvas.flush_events()
         plt.pause(0.05)
+
+
+class ManualPredictionAccumulator(Observer):
+    def __init__(self, uri: Optional[Text] = None, patch_collar: float = 0.05):
+        super().__init__()
+        self.uri = uri
+        self.patch_collar = patch_collar
+        self._prediction: Optional[Annotation] = None
+        self._queue = SimpleQueue()
+
+    def patch(self):
+        """Stitch same-speaker turns that are close to each other"""
+        if self._prediction is not None:
+            self._prediction = self._prediction.support(self.patch_collar)
+
+    def get_prediction(self) -> Annotation:
+        # Patch again in case this is called before on_completed
+        self.patch()
+        return self._prediction
+
+    # This method is used to get the prediction of the earliest unprocessed chunk 
+    # If blocking is set to True, the method will wait until a new chunk is available
+    # If timeout is set to a positive value, the method will wait for at most timeout seconds, if None it will wait forever
+    # If appendChunk is set to an Annotation, it will be appended to the chunk before, otherwise ignored
+    def get_chunk_prediction(self, blocking=False, timeout=30, appendChunk: Optional[Annotation] = None) -> Optional[Annotation]:
+        if appendChunk is not None:
+            appendChunk.uri = str(self.uri)
+            self._queue.put(appendChunk)
+        try:
+            prediction = self._queue.get(blocking, timeout)
+            if prediction is None:
+                return None
+            
+            if appendChunk is not None:
+                prediction.update(appendChunk)
+
+            prediction = prediction.support(self.patch_collar) # patch the prediction
+            return prediction
+        except Empty as e:
+            return None
+
+    def on_next(self, value: Union[Tuple, Annotation]):
+        prediction = _extract_prediction(value)
+        prediction.uri = self.uri
+        self._queue.put(prediction)
+        if self._prediction is None:
+            self._prediction = prediction
+        else:
+            self._prediction.update(prediction)
+
+    def on_error(self, error: Exception):
+        self.patch()
+
+    def on_completed(self):
+        self.patch()

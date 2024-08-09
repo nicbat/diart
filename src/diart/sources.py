@@ -360,7 +360,7 @@ class ManualAudioSource(AudioSource):
         self._queue.put_nowait(chunk)
 
     def read(self):
-        while not self.closed:
+        while not self.closed or not self._queue.empty():
             try:
                 while self._queue.empty():
                     if self.closed:
